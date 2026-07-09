@@ -28,6 +28,7 @@ set(srcs
     "devices/src/mpu6050.c"
     "devices/src/buzzer.c"
     "devices/src/l293.c"
+    "devices/src/u8g2_esp32_hal.c"
     )
 
 # Always included headers
@@ -36,4 +37,4 @@ set(includes "microcontroller/inc"
 
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS ${includes}
-                       REQUIRES driver esp_adc nvs_flash bt)
+                       REQUIRES driver esp_adc nvs_flash bt u8g2)

@@ -8,7 +8,8 @@
                 "${config:idf.espIdfPathWin}/components/**",
                 "${config:idf.espAdfPath}/components/**",
                 "${config:idf.espAdfPathWin}/components/**",
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                "C:/Repositorios/Didactic-Brain/firmware/projects/LedCodeNervio/components/u8g2/csrc"
             ],
             "browse": {
                 "path": [
@@ -16,7 +17,8 @@
                     "${config:idf.espIdfPathWin}/components",
                     "${config:idf.espAdfPath}/components/**",
                     "${config:idf.espAdfPathWin}/components/**",
-                    "${workspaceFolder}"
+                    "${workspaceFolder}",
+                    "C:/Repositorios/Didactic-Brain/firmware/projects/LedCodeNervio/components/u8g2/csrc"
                 ],
                 "limitSymbolsToIncludedHeaders": false
             }
