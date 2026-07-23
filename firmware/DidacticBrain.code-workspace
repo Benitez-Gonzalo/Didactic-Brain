@@ -4,21 +4,6 @@
             "path": "./drivers"
         },
         {
-            "path": "./projects/0_blinking"
-        },
-        {
-            "path": "./projects/1_blinking_switch"
-        },
-        {
-            "path": "projects/2_blinking_tasks"
-        },
-        {
-            "path": "projects/3_blinking_timer"
-        },
-        {
-            "path": "./projects/x_template"
-        },
-        {
             "path": "projects/LedCodeNervio"
         }
     ],
