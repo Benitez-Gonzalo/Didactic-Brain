@@ -2,16 +2,33 @@
  *
  * @section genDesc General Description
  *
- * This section describes how the program works.
+ * El programa controla la lógica de un par de tiras LED las cuales simulan impulsos nerviosos.
  *
  * <a href="https://drive.google.com/...">Operation Example</a>
  *
- * @section hardConn Hardware Connection
- *
- * |    Peripheral  |   ESP32   	|
+ * @section hardConn Hardware Connection (keep this updated)
+ * 
+ * |    OLED SPI    |     ESP32   	|
  * |:--------------:|:--------------|
- * | 	GPIO_X	 	| 	GPIO_X		|
- *
+ * |      GND	    | 	  GND	    |
+ * |      VCC   	| 	  3.3 V	    |
+ * |      SCK    	| 	  GPIO 6    |
+ * |      SDA   	| 	  GPIO 7    |
+ * |      RES   	| 	  GPIO 21   |
+ * |      DC	    | 	  GPIO 20   |
+ * |      CS	    | 	  GPIO 10   |
+ * 
+ * |    LED Strip 1 |    ESP32   	|
+ * |:--------------:|:--------------|
+ * |      GND	    | 	  GND	    |
+ * |      VCC	    | 	  12 V	    |
+ * |      DI/DO	    | 	  GPIO 18   |
+ * |      BI/BO	    |  	  GND       |
+ * 
+ * |    Button      |    ESP32   	|
+ * |:--------------:|:--------------|
+ * |     PIN 1	    | 	  GND	    |
+ * |     PIN 2	    | 	  GPIO 22	|
  *
  * @section changelog Changelog
  *
@@ -35,7 +52,7 @@
 #include "driver/gpio.h"             
 /*==================[macros and definitions]=================================*/
 #define LED_STRIP_GPIO  18        // GPIO TIRA LED
-#define LED_COUNT   20      // Cantidad de LEDs de la tira
+#define LED_COUNT   10      // Cantidad de LEDs de la tira
 #define CONFIG_LED_PERIOD 1000000 //Tiempo que dura el estímulo.
 
 #define BUTTON_GPIO 22
@@ -48,9 +65,11 @@
 #define GPIO_OLED_DC     20
 #define GPIO_OLED_CS     10
 /*==================[internal data definition]===============================*/
-TaskHandle_t reflexArcSimulationTask = NULL;
 led_strip_handle_t led_strip;
+
 u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
+
+
 /**
  * @brief Definición de los estados del sistema
  */
@@ -61,10 +80,15 @@ typedef enum {
     MODE_TRAIN,
     MODE_MAX_COUNT
 }system_mode_t; //Nota de color: la "t" al final de las variables denota "tipo".
+
 system_mode_t current_mode = MODE_IDLE; //Estado actual del sistema.
+
 QueueHandle_t mode_queue; //Usamos un queue para ir informado los cambios de modo.
+
 u8g2_t u8g2; //Estructura pantalla OLED
+
 char buffer[32]; //Buffer para el mensaje mostrado por la pantalla OLED.
+
 /*==================[internal functions declaration]=========================*/
  
 //-------------Inicio bloque de funciones auxiliares-------------//
@@ -139,7 +163,6 @@ void init_oled_display() {
     vTaskDelay(pdMS_TO_TICKS(100));  // Esperar a que la pantalla despierte
 
     // 4. Configuración del Driver
-    // INTENTO 1: SH1106 (Común en pantallas SPI de 1.3")
     
     u8g2_Setup_sh1106_128x64_noname_f(
         &u8g2,
@@ -147,17 +170,7 @@ void init_oled_display() {
         (u8x8_msg_cb)u8g2_esp32_spi_byte_cb,
         (u8x8_msg_cb)u8g2_esp32_gpio_and_delay_cb
     );
-    
-    /*
-    // NOTA: Si ves la imagen corrida o con ruido, comenta la linea de arriba 
-    // y descomenta la de abajo para probar el driver SSD1306: 
-    u8g2_Setup_ssd1306_128x64_noname_f(
-        &u8g2,
-        U8G2_R0,
-        (u8x8_msg_cb)u8g2_esp32_spi_byte_cb,
-        (u8x8_msg_cb)u8g2_esp32_gpio_and_delay_cb
-    );
-    */
+
 
     u8g2_InitDisplay(&u8g2);
     u8g2_SetPowerSave(&u8g2, 0); // Encender display
@@ -178,6 +191,7 @@ void configure_button(){
 //-------------Fin bloque de funciones auxiliares-------------//
 
 //------------------Inicio bloque de tareas-------------------//
+
 
 static void taskLedControl(void *pvParameters){
     system_mode_t received_mode;
