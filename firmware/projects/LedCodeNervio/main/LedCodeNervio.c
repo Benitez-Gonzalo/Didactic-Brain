@@ -51,9 +51,12 @@
 #include "u8g2_esp32_hal.h"
 #include "driver/gpio.h"             
 /*==================[macros and definitions]=================================*/
-#define LED_STRIP_GPIO  18        // GPIO TIRA LED
-#define LED_COUNT   10      // Cantidad de LEDs de la tira
-#define CONFIG_LED_PERIOD 1000000 //Tiempo que dura el estímulo.
+#define STRIP_A_GPIO      18      // GPIO TIRA LED N° 1
+#define STRIP_B_GPIO      19      // GPIO TIRA LED N° 2
+#define LED_COUNT_A      10      // Cantidad de LEDs de la tira N°1
+#define LED_COUNT_B      10      // Cantidad de LEDs de la tira N°2
+
+#define FRAME_PERIOD_MS  10       // Tick del motor de animación de las tiras. Todas las vías se actualizan a este ritmo.
 
 #define BUTTON_GPIO 22
 
@@ -64,42 +67,56 @@
 #define GPIO_OLED_RES    21
 #define GPIO_OLED_DC     20
 #define GPIO_OLED_CS     10
-/*==================[internal data definition]===============================*/
-led_strip_handle_t led_strip;
-
-u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
-
 
 /**
- * @brief Definición de los estados del sistema
+ * @brief Identificador de cada vía nerviosa simulada.
+ * Las 3 primeras son sensitivas (ascendentes: médula -> cerebro).
+ * Las 2 últimas son motoras (descendentes: cerebro -> médula).
  */
 typedef enum {
-    MODE_IDLE = 0,
-    MODE_FAST,
-    MODE_SLOW,
-    MODE_TRAIN,
-    MODE_MAX_COUNT
-}system_mode_t; //Nota de color: la "t" al final de las variables denota "tipo".
+    PATHWAY_SPINOTHALAMIC_L = 0,   // Espinotalámica, tren inferior izquierdo
+    PATHWAY_SPINOTHALAMIC_R,       // Espinotalámica, tren inferior derecho
+    PATHWAY_DCML,                  // Cordón posterior - lemnisco medial
+    PATHWAY_CORTICOSPINAL_LATERAL, // Motora, corticoespinal lateral
+    PATHWAY_CORTICOSPINAL_ANTERIOR,// Motora, corticoespinal anterior
+    PATHWAY_COUNT
+} pathway_id_t;
 
-system_mode_t current_mode = MODE_IDLE; //Estado actual del sistema.
+/*==================[internal data definition]===============================*/
+led_strip_handle_t led_strip_a;
+led_strip_handle_t led_strip_b;
 
-QueueHandle_t mode_queue; //Usamos un queue para ir informado los cambios de modo.
-
+u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
 u8g2_t u8g2; //Estructura pantalla OLED
 
 char buffer[32]; //Buffer para el mensaje mostrado por la pantalla OLED.
+
+QueueHandle_t mode_queue; //Usamos un queue para ir informado los cambios de modo.
+
+/**
+ * @brief Configuración de los parámetros de una vía nerviosa. La dirección de la misma se define con los valores de start_led y end_led.
+ * @param tail_length Es el largo de cola de LEDs encendidos. Es un parámetro estético, no funcional.
+ */
+typedef struct {
+    led_strip_handle_t *strip;
+    int start_led;
+    int end_led;
+    int tail_length;
+    int speed_ms;
+    uint8_t r,g,b;
+    bool active;
+    int head;
+    int elapsed_ms;
+}pathway_t;
+
+pathway_t pathways[PATHWAY_COUNT];
 
 /*==================[internal functions declaration]=========================*/
  
 //-------------Inicio bloque de funciones auxiliares-------------//
 
 /**
- * @brief Función que asigna los colores a la tira GRB.
- * @param strip Tipo tira led.
- * @param index Índice que indica el led a encender.
- * @param red Intensidad de rojo.
- * @param green Intensidad de verde.
- * @param blue Intensidad de azul.
+ * @brief La tira es GRB. Esta función asigna los colores en RGB, que es más común.
  */
 void set_led_color(led_strip_handle_t strip, int index, int red, int green, int blue) 
 {
@@ -107,35 +124,55 @@ void set_led_color(led_strip_handle_t strip, int index, int red, int green, int 
 }
 
 /**
- * @brief Función que detecta si hubo un cambio de modo.
+ * @brief Configura los parámetros fijos de una vía (no la dispara).
+ * @param id Identificador de la vía (pathway_id_t).
+ * @param strip Puntero a la tira física donde vive el tramo de esta vía.
+ * @param start_led Primer LED del tramo (extremo de inicio de la animación).
+ * @param end_led Último LED del tramo (extremo de llegada). El orden entre
+ *                start_led y end_led define la dirección del impulso (si es 
+ *                motor o sensitivo).
  */
-bool check_mode_change(){
-    return uxQueueMessagesWaiting(mode_queue) > 0;
+void pathway_configure(pathway_id_t id, led_strip_handle_t *strip,
+                        int start_led, int end_led, int tail_length, int speed_ms,
+                        uint8_t r, uint8_t g, uint8_t b)
+{
+    pathways[id].strip       = strip;
+    pathways[id].start_led   = start_led;
+    pathways[id].end_led     = end_led;
+    pathways[id].tail_length = tail_length;
+    pathways[id].speed_ms    = speed_ms;
+    pathways[id].r = r; pathways[id].g = g; pathways[id].b = b;
+    pathways[id].active      = false;
 }
 
 /**
- * @brief Función que simula el impulso nervioso.
- * @param tail_length Cantidad de ledes encendidos al mismo tiempo en la cola.
- * @param speed_ms Velocidad del efecto.
- * @param r Intensidad de rojo.
- * @param g Intensidad de verde.
- * @param b Intensidad de azul.
+ * @brief Dispara el impulso de una via.
  */
-void generate_nerve_impulse(int tail_length,int speed_ms,int r, int g, int b){
-    float fade_factor = 0.0;
-    int pixel_id = 0;
-    for(int head=0; head < (LED_COUNT + tail_length); head++){
-        if(check_mode_change()) return; //En este caso, como la función es void, el "return" saldrá de la misma.
-        led_strip_clear(led_strip);
-        for(int i=0; i<tail_length; i++){
-            pixel_id = head - i;
-            if(pixel_id >= 0 && pixel_id < LED_COUNT){
-                fade_factor = 1 - ((float)i / tail_length);
-                set_led_color(led_strip,pixel_id,(int)(r*fade_factor),(int)(g*fade_factor),(int)(b*fade_factor));
-            }           
+void pathway_trigger(pathway_id_t id)
+{
+    pathways[id].head        = 0;
+    pathways[id].elapsed_ms  = 0;
+    pathways[id].active      = true;   
+}
+
+/**
+ * @brief Escribe en el framebuffer de la tira los píxeles correspondientes
+ * al estado actual de una vía (un solo frame). No limpia ni refresca la tira:
+ * eso lo hace impulseEngineTask una vez por frame para todas las vías juntas.
+ */
+static void render_pathway(pathway_t *p)
+{
+    int seg_len = abs(p->end_led - p->start_led) + 1;
+    int dir = (p->end_led >= p->start_led) ? 1 : -1;
+ 
+    for (int i = 0; i < p->tail_length; i++) {
+        int pos = p->head - i;
+        if (pos >= 0 && pos < seg_len) {
+            int led_index = p->start_led + dir * pos;
+            float fade = 1.0f - ((float)i / p->tail_length);
+            set_led_color(*(p->strip), led_index,
+                          (int)(p->r * fade), (int)(p->g * fade), (int)(p->b * fade));
         }
-        led_strip_refresh(led_strip);
-        vTaskDelay(pdMS_TO_TICKS(speed_ms));
     }
 }
 
@@ -193,94 +230,97 @@ void configure_button(){
 //------------------Inicio bloque de tareas-------------------//
 
 
-static void taskLedControl(void *pvParameters){
-    system_mode_t received_mode;
+static void impulseEngineTask(void *pvParameters){
 
-    while(true){
+    while (true){
 
-        //Necesitamos revisar si hay un comando en la cola.
-        if(xQueueReceive(mode_queue,&received_mode,0) == pdTRUE){
-            current_mode = received_mode;
-            led_strip_clear(led_strip);
-            led_strip_refresh(led_strip);
+        led_strip_clear(led_strip_a);
+        led_strip_clear(led_strip_b);
+
+        for (int i = 0; i<PATHWAY_COUNT; i++){
+            pathway_t *p = &pathways[i];
+
+            if(!p->active) continue;
+
+            render_pathway(p);
+
+            p->elapsed_ms += FRAME_PERIOD_MS;
+            if(p->elapsed_ms >= p->speed_ms){
+                p->elapsed_ms = 0;
+                p->head++;
+                int seg_len = abs(p->end_led - p->start_led) + 1;
+                if(p->head >= seg_len + p->tail_length){
+                    p->active = false; 
+                }
+            }
         }
 
-        switch (current_mode){
+        led_strip_refresh(led_strip_a);
+        led_strip_refresh(led_strip_b);
 
-            case MODE_IDLE:
-                led_strip_clear(led_strip);
-                led_strip_refresh(led_strip);
-                vTaskDelay(pdMS_TO_TICKS(100));
-            break;
+        vTaskDelay(pdMS_TO_TICKS(FRAME_PERIOD_MS));
 
-            case MODE_FAST:
-                generate_nerve_impulse(4,100,255,0,255);
-                vTaskDelay(pdMS_TO_TICKS(300));
-            break;
-
-            case MODE_SLOW:
-                generate_nerve_impulse(4,300,153,51,102);
-                vTaskDelay(pdMS_TO_TICKS(500));
-            break;
-
-            case MODE_TRAIN:
-                //Two fast pulses
-                generate_nerve_impulse(4,50,204,255,255);
-                if(!check_mode_change()) generate_nerve_impulse(4,50,204,255,255);
-                vTaskDelay(pdMS_TO_TICKS(100));
-            break;
-
-            default: break;
-
-        }
     }
 }
 
+
 static void oledManaging(void *pvParameter){
-
+ 
     init_oled_display();
-
+ 
+    static const char *pathway_names[PATHWAY_COUNT] = {
+        "ESPTAL. IZQ.",
+        "ESPTAL. DER.",
+        "CP-LM",
+        "CORT.ESP. LAT.",
+        "CORT.ESP. ANT."
+    };
+ 
     while(true){
-            
+ 
         u8g2_ClearBuffer(&u8g2);
-
+ 
         u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
         u8g2_DrawStr(&u8g2,5,14,"DidacticBrain");
         u8g2_DrawHLine(&u8g2,0,15,128);
-
+ 
         u8g2_SetFont(&u8g2, u8g2_font_6x10_tf);
-        u8g2_DrawStr(&u8g2,5,30,"Modo: ");
-        
-        switch (current_mode) {
-            case MODE_IDLE: sprintf(buffer, "REPOSO"); break;
-            case MODE_FAST: sprintf(buffer, "MIELINICO"); break;
-            case MODE_SLOW: sprintf(buffer, "DOLOR (C)"); break;
-            case MODE_TRAIN:sprintf(buffer, "TREN IMP."); break;
-            default:        sprintf(buffer, "???"); break;
+        u8g2_DrawStr(&u8g2,5,30,"Via activa: ");
+ 
+        // Muestra la última vía disparada que sigue activa.
+        sprintf(buffer, "---");
+        for (int i = 0; i < PATHWAY_COUNT; i++) {
+            if (pathways[i].active) {
+                sprintf(buffer, "%s", pathway_names[i]);
+                break;
+            }
         }
-
+ 
         int str_width = u8g2_GetStrWidth(&u8g2, buffer);
         u8g2_DrawStr(&u8g2, (128 - str_width)/2,50,buffer);
         u8g2_SendBuffer(&u8g2);
-
+ 
         vTaskDelay(pdMS_TO_TICKS(100));
-
     }
 }
 
+/**
+ * @brief Tarea de prueba: cada pulsación cicla y dispara una vía distinta.
+ * Esto es solo un demo para validar el motor de animación; la lógica real
+ * de qué vía disparar (según estímulo/otro periférico) se define después.
+ */
 static void manageButton (void *pvParameters){
-
+ 
     configure_button();
     int next_state_prev = 1; // Pull-up
-    system_mode_t next_mode_val = MODE_IDLE;
-
+    pathway_id_t next_pathway = PATHWAY_SPINOTHALAMIC_L;
+ 
     while(true){
         int next_state = !GPIORead(BUTTON_GPIO);
-
+ 
         if(next_state == 0 && next_state_prev == 1){
-            next_mode_val = current_mode + 1;
-            if (next_mode_val >= MODE_MAX_COUNT) next_mode_val = MODE_IDLE;
-            xQueueSend(mode_queue,&next_mode_val,0);
+            pathway_trigger(next_pathway);
+            next_pathway = (next_pathway + 1) % PATHWAY_COUNT;
         }
         next_state_prev = next_state;
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -290,20 +330,45 @@ static void manageButton (void *pvParameters){
 /*==================[external functions definition]==========================*/
 void app_main(void){
 
-    mode_queue = xQueueCreate(10,sizeof(system_mode_t));
-
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = LED_STRIP_GPIO,
-        .max_leds = LED_COUNT,
+    led_strip_config_t strip_a_config = {
+        .strip_gpio_num = STRIP_A_GPIO,
+        .max_leds = LED_COUNT_A,
     };
-
-    led_strip_rmt_config_t chip_config = {
+    led_strip_rmt_config_t chip_a_config = {
         .resolution_hz = 10000000, //Diez millones
         .flags.with_dma = false,
     };
-    led_strip_new_rmt_device(&strip_config, &chip_config, &led_strip);
+    led_strip_new_rmt_device(&strip_a_config, &chip_a_config, &led_strip_a);
+ 
+    led_strip_config_t strip_b_config = {
+        .strip_gpio_num = STRIP_B_GPIO,
+        .max_leds = LED_COUNT_B,
+    };
+    led_strip_rmt_config_t chip_b_config = {
+        .resolution_hz = 10000000,
+        .flags.with_dma = false,
+    };
+    led_strip_new_rmt_device(&strip_b_config, &chip_b_config, &led_strip_b);
 
-    xTaskCreate(&taskLedControl,"LedControl",2048,NULL,5,NULL);
+    // --------------------------------------------------------------------
+    // AJUSTAR: estos rangos de LEDs son PLACEHOLDERS. Reemplazar por los
+    // índices reales de cada tramo una vez que tengamos exactamente por qué
+    // huecos de qué secciones queda enhebrada cada vía en cada tira física.
+    // El orden (start_led -> end_led) define la dirección de la animación:
+    // ascendente para las sensitivas (médula -> cerebro), descendente para
+    // las motoras (cerebro -> médula).
+    // --------------------------------------------------------------------
+ 
+    // Vías sensitivas (ascendentes)
+    pathway_configure(PATHWAY_SPINOTHALAMIC_L, &led_strip_a, 0, 5, 2, 100, 255, 0, 255);
+    pathway_configure(PATHWAY_SPINOTHALAMIC_R, &led_strip_a, 4, 8, 2, 100, 255, 0, 255);
+    pathway_configure(PATHWAY_DCML,            &led_strip_b, 0, 9,  3, 150, 153, 51, 102);
+ 
+    // Vías motoras (descendentes)
+    pathway_configure(PATHWAY_CORTICOSPINAL_LATERAL,  &led_strip_a, 9, 5, 2, 100, 204, 255, 255);
+    pathway_configure(PATHWAY_CORTICOSPINAL_ANTERIOR, &led_strip_b, 7, 3, 2, 100, 204, 255, 255);
+ 
+    xTaskCreate(&impulseEngineTask,"ImpulseEngine",2048,NULL,5,NULL);
     xTaskCreate(&oledManaging,"OledControl",2048,NULL,5,NULL);
     xTaskCreate(&manageButton,"ButtonControl",2048,NULL,5,NULL);
 }
